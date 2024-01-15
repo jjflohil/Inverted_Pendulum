@@ -114,9 +114,12 @@ float lastP = 0;
 float lastV = 0;
 
 float Pgain = 0;
-float Vgain = 0;
+float Dgain = 0;
 float Igain = 0;
 float LP = 1.0;
+float pendPosGain = 0.0;
+float pendVelGain = 0.0;
+
 //========================Setup========================//
 void setup() {
   xTaskCreatePinnedToCore(Task0_WifiCode, "Task0", 10000,  NULL, 1, &Task0_Wifi,0); 
@@ -187,7 +190,7 @@ void Task0_WifiCode( void * pvParameters ){
           UDP.printf(",");
           UDP.printf(String(uint32_t(5000000+pend.velocityFiltered*1000)).c_str(),10);
           UDP.printf(",");
-          UDP.printf(String(uint32_t(5000000+ctrl*1000)).c_str(),10);
+          UDP.printf(String(uint32_t(5000000+errInt*1000)).c_str(),10);
           UDP.endPacket();
         }
       }
@@ -233,67 +236,83 @@ void Task1_ControlSystemCode( void * pvParameters ){
       pend.position = float(Enc1_0.position)/2400*2*pi;  //[rad]
       pend.velocity = (pend.position-pend.lastPosition)*10;
       pend.positionFiltered = pend.positionFiltered + 1.0 * (pend.position - pend.positionFiltered);
-      pend.velocityFiltered = pend.velocityFiltered + 0.9 * (pend.velocity - pend.velocityFiltered);
+      pend.velocityFiltered = pend.velocityFiltered + 0.8 * (pend.velocity - pend.velocityFiltered);
 
       // Stationary
       if(Mode==0){
-        Pgain = 2.0;
-        Vgain = 1.0;
+        Pgain = 20.0;
+        Dgain = 0.1;
         Igain = 5.0;
         cart.refPos = -0.125;
         cart.refVel = 0.0;
       }
       //step
       else if(Mode==1){
-        Pgain = 5;
-        Igain = 5;
-        Vgain = 1;
+        Pgain = 10.0;
+        Igain = 10.0;
+        Dgain = 0.05;
         cart.refPos = 0.1*round(sin(2*pi*0.1*tr));
         cart.refVel = 0.0;
       }
       //sine
       else if(Mode==2){
-        Pgain = 20;
-        Vgain = 60;
+        Pgain = 20.0;
         Igain = 20;// 0..25
+        Dgain = 60.0;
         cart.refPos = 0.1*sin(2*pi*0.1*tr);
         cart.refVel = 0.1*0.1*cos(2*pi*0.1*tr);
       }
       //track user input
       else if(Mode==3){
-        Pgain = 15;
-        Vgain = 0.01;
+        Pgain = 15.0;
         Igain = 10.0; // 0..25
+        Dgain = 0.01;
         cart.refPos = 0.24 * (R-127)/255;
         cart.refVel = 0.0;
       }
       //track pendulum down
       else if(Mode==4){
-        Pgain = 10;
-        Vgain = 0.01;
-        cart.refPos = 0.01 * pend.position + 0.05 * pend.velocityFiltered;
-        cart.refVel = 0.0;
+        pendPosGain = 1.0;
+        pendVelGain = 0.1;
+        Pgain = 7;
+        Dgain = 40;
+        Igain = 0.0;
+        cart.refPos =  pendPosGain * pend.position;
+        cart.refVel =  pendVelGain * pend.velocityFiltered;
+      }
+      //track pendulum up
+      else if(Mode==5){
+        pendPosGain = 1.0;
+        pendVelGain = 0.1;
+        Pgain = 7;
+        Dgain = 40;
+        Igain = 0.0;
+        cart.refPos =  -1 * pendPosGain * (pend.position-pi);
+        cart.refVel = pendVelGain * pend.velocityFiltered;
       }
       else{
         Pgain = 0;
-        Vgain = 0;
+        Dgain = 0;
       }
 
       cart.e_pos = cart.refPos-cart.positionFiltered;
       cart.e_vel = cart.refVel-cart.velocityFiltered;
-      //Integral action
-      errInt = errInt + cart.e_pos/10;
+
+      //Integral action only in small error band of +-3cm
+      if(cart.e_pos < 0.03 && cart.e_pos > -0.03){
+        errInt = errInt + cart.e_pos/10;
+      }
       //Anti-windup
       if((errInt > 0 && cart.e_pos < 0) || (errInt < 0 && cart.e_pos > 0)){
         errInt = 0;
       }
-      if(errInt > 10.0){
-        errInt = 10.0;
+      if(errInt > 1.0){
+        errInt = 1.0;
       }
-      if(errInt < -10.0){
-        errInt = -10.0;
+      if(errInt < -1.0){
+        errInt = -1.0;
       }
-      ctrl = Pgain * cart.e_pos + Igain * errInt + Vgain * cart.e_vel;
+      ctrl = Pgain * cart.e_pos + Igain * errInt + Dgain * cart.e_vel;
       
       
       if(ctrl > 0){
