@@ -2,7 +2,7 @@
 
 //Wifi parameters
 const char* ssid2 = "MilperHome";
-const char* password2 = "2TXTpvb6Xwxpn7hj";
+const char* password2 = "********";
 
 // Acces point parameters
 const char* ssid     = "InvertedPendulum_AccesPoint";
@@ -56,91 +56,77 @@ uint32_t  t_movingAvg   = 0;   // Current time effect
 uint16_t  ts_movingAvg  = 15;   // Sample time effect
 uint32_t  t_rbs   = 0;   // Current time effect
 uint16_t  ts_rbs  = 200;   // Sample time effect
+uint32_t  tc = 0;
+uint16_t  ts = 1;
+float     tr = 0;
 
 //Function Parameters
 uint8_t ModeP = 0;
-uint8_t nLEDs_H = 12;
-uint32_t LeftColor[12];
-uint32_t RightColor[12];
-uint32_t TotalColor[23];
 
+// Set PWM properties
+const int freq = 20000;
+const int motorChannel = 0;
+const int resolution = 8;
 
-//State Feedback Parameters
-float A_system[1];
-//Observer Parameters
+//Other Parameters
+const float pi = 3.14159265359;
 
-
-//State feedback LQR
-struct LQR5{
-    float Q[5][5];
-    float R;
-    float K[1][5];
+struct component {
+  float refPos;
+  float refVel;
+  float refAcc;
+  float position;
+  float velocity;
+  float acceleration;
+  float lastPosition;
+  float lastVelocity;
+  float positionFiltered;
+  float velocityFiltered;
+  float accelerationFiltered;
+  float e_pos;
+  float e_vel;
+  float e_acc;
 };
-//State space representation with 5 states, 2 outputs and 1 input
-struct StateSpace_5_2_1{
-    float A[5][5];
-    float B[1][5];
-    float C[5][2];
-    float D[1][2];
+
+struct EncoderPulse {
+	const uint8_t PIN;
+	int32_t position;
 };
 
-StateSpace_5_2_1 Observer = {{1,         0.005,  0,          -0.002      ,   0       ,
-                              0.0905,    1,      0.0763,     -0.9047     ,   0.0131  ,
-                              0,         0,      1,          0.0048      ,   0       ,
-                              0,         0,      0,          0.8984      ,   00032   ,
-                              0,         0,      -0.0036,    -34.6930    ,   0.3417  },
-                            
-                            {0		    ,-0.0029,   0,	    -0.0008,    	0.2370  },
-                            
-                            {1, 0, 0, 0, 0, 
-                             0, 0, 1, 0, 0},
+struct motor {
+  const uint8_t VoltPin;
+  const uint8_t DirPin0;
+  const uint8_t DirPin1;
+  uint32_t Volt;
+  bool Direction;
+};
 
-                            {0, 0}
-                             };
-   
+EncoderPulse Enc0_0 = {21, 0};
+EncoderPulse Enc0_1 = {22, 0};
+EncoderPulse Enc1_0 = {32, 0};
+EncoderPulse Enc1_1 = {33, 0};
 
-float MatMul(float Mat0In[], float Mat1In[], int Size0, int Size1){
-    float MatOut[Size0][Size1];
+component cart = {0,0,0,0,0,0,0};
+component pend = {0,0,0,0,0,0,0};
 
-    for(int i=0;i<Size0;i++){
-        MatOut[i][0] =+ Mat0In[i]*Mat0In[i+Size1]; 
-    }
+motor mot = {26,18,19,0,false};
 
-}
-//m(0, 0) = 3;
-//m(1, 0) = 2.5;
-//m(0, 1) = -1;
-//m(1, 1) = m(1, 0) + m(0, 1);
-//MatrixXd m = MatrixXd::Random(3, 3);
-//m = (m + MatrixXd::Constant(3, 3, 1.2)) * 50;
-
-//LQR5 LQR_UP
-/*
-//Q = diag([1 0.01 20000 2.2 0]);
-//R = 20*10^-9;
-//K_ul = dlqr(A_ou,B_ou,Q,R);
-//u = round(-K_ul*[theta ; x_o(2) ; q ; x_o(4) ; x_o(5)] + G*r);
-
-% State feedback LQR
-Q = diag([5 0.4 4000 2 0]);
-R = 20*10^-6;
-K_u = dlqr(A_ou,B_ou,Q,R);
-
-% Observer LQR
-Q = diag([1 0 1 0.1 0]);
-R = [10 0 ; 0 50];
-L_u = dlqr(A_ou',C_ou',Q,R)';
-
-% State feedback LQR down
-Q = diag([30 0.1 10000 0.6 0]);
-R = 20*10^-9;
-K_d = dlqr(A_od,B_od,Q,R);
-
-% Observer LQR down
-Q = diag([1 1 1 1 0]);
-R = [1 0 ; 0 10];
-L_d = dlqr(A_od',C_od',Q,R)';
-
-% Gain which sets DC gain to 1 (Only perfect in case the model is perfect)
-G =  1./(Du(2)-(Cu(2,:)-Du(2)*K_u)*inv(Au-Bu*K_u)*Bu);
-*/
+//Control parameters
+float ctrl = 0;
+float ctrl_cur = 0;
+float ctrl_past = 0;
+float errInt = 0;
+float PendErrInt = 0;
+float errPast = 0;
+float PosScaled = 0;
+float VelScaled = 0;
+float lastP = 0;
+float lastV = 0;
+float Pgain = 0;
+float Dgain = 0;
+float Again = 0;
+float Igain = 0;
+float Xgain = 0;
+float LP = 1.0;
+float pendPosGain = 0.0;
+float pendVelGain = 0.0;

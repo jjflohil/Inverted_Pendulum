@@ -1,3 +1,12 @@
+// This script is used to control an inverted pedulum based om an old inkject printer
+//  - The controller is an ESP32 wroom development board
+//  - The printer has two optical encoders (1 linear and 1 rotational) and a DC motor
+//  - A pythonista interface is used to send artnet DMX messages to control the modes and parameters
+//
+//  This code can be freely used for personal and educational purposes
+//
+//  Last update: 18 Jan 2024,  Jasper Flohil
+
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WiFiAP.h>
@@ -5,86 +14,25 @@
 #include <ArduinoOTA.h>
 #include <WiFiUdp.h>
 #include <WiFiClient.h> 
+
 //Load global parameters
 #include <GlobalParameters.h>
 
-
-// setting PWM properties
-const int freq = 20000;
-const int motorChannel = 0;
-const int resolution = 8;
-
-float ctrl_unlimited = 0;
 // Create a task handler to be able to use processor 0 for separate tasking 
 TaskHandle_t Task0_Wifi;
 TaskHandle_t Task1_ControlSystem;
 
+// Create Artnet and UPD objects 
 ArtnetWifi artnet;
 ArtnetWifi artnetSend;
-
 WiFiUDP UDP;
 IPAddress macbookIP(192,168,2,23);
 unsigned int localUdpPort = 4210;
-//Parameters
-const float pi = 3.14159265359;
-
-struct component {
-  float refPos;
-  float refVel;
-  float refAcc;
-  float position;
-  float velocity;
-  float acceleration;
-  float lastPosition;
-  float lastVelocity;
-  float positionFiltered;
-  float velocityFiltered;
-  float accelerationFiltered;
-  float e_pos;
-  float e_vel;
-  float e_acc;
-};
-
-struct EncoderPulse {
-	const uint8_t PIN;
-	int32_t position;
-};
-
-struct motor {
-  const uint8_t VoltPin;
-  const uint8_t DirPin0;
-  const uint8_t DirPin1;
-  uint32_t Volt;
-  bool Direction;
-};
-
-EncoderPulse Enc0_0 = {21, 0};
-EncoderPulse Enc0_1 = {22, 0};
-EncoderPulse Enc1_0 = {32, 0};
-EncoderPulse Enc1_1 = {33, 0};
-
-component cart = {0,0,0,0,0,0,0};
-component pend = {0,0,0,0,0,0,0};
-
-motor mot = {26,18,19,0,false};
-
-//Time parameters
-long  tc = 0;
-int   ts = 1;
-float tr = 0;
-float errInt = 0;
-float PendErrInt = 0;
-float errPast = 0;
-//Temporary control parameters
-float ctrl = 0;
-float ctrl_cur = 0;
-float ctrl_past = 0;
 
 //Initialize functions
 void onDmxFrame(uint16_t , uint16_t , uint8_t , uint8_t*);
 void Task0_WifiCode( void *);
 void Task1_ControlSystemCode( void *);
-
 
 //Encoder interrupts
 void IRAM_ATTR isr00() {
@@ -120,117 +68,97 @@ void IRAM_ATTR isr11() {
   }
 }
 
-float PosScaled = 0;
-float VelScaled = 0;
-float lastP = 0;
-float lastV = 0;
-
-float Pgain = 0;
-float Dgain = 0;
-float Again = 0;
-float Igain = 0;
-float Xgain = 0;
-float LP = 1.0;
-float pendPosGain = 0.0;
-float pendVelGain = 0.0;
-
 //========================Setup========================//
 void setup() {
+  //Initialize processor tasks
   xTaskCreatePinnedToCore(Task0_WifiCode, "Task0", 10000,  NULL, 1, &Task0_Wifi,0); 
   xTaskCreatePinnedToCore(Task1_ControlSystemCode, "Task1", 10000,  NULL, 1, &Task1_ControlSystem,1); 
 
 }
 
-
+//Task 0 runs on processor core 0 and controls WIFI, all communication and OTA programming
 void Task0_WifiCode( void * pvParameters ){
   //------------------------------Local Setup --------------------------------//
-  //WiFi.mode(WIFI_AP);
-  //WiFi.softAPConfig(local_IP2, gateway2, subnet);
-  //WiFi.softAP(ssid, password);
   Serial.begin(9600);
-  if(1){
-    //Wifi setup
-    WiFi.mode(WIFI_STA);
-    WiFi.config(local_IP2, gateway2, subnet);
-    WiFi.begin(ssid2, password2);
-    while (WiFi.waitForConnectResult() != WL_CONNECTED) {
-      delay(3000);
-    }
+  //Wifi setup
+  WiFi.mode(WIFI_STA);
+  WiFi.config(local_IP2, gateway2, subnet);
+  WiFi.begin(ssid2, password2);
+  while (WiFi.waitForConnectResult() != WL_CONNECTED) {
+    delay(3000);
+  }
 
-    //Artnet receive data
-    artnet.begin();
-    artnet.setArtDmxCallback(onDmxFrame);
+  //Artnet receive data
+  artnet.begin();
+  artnet.setArtDmxCallback(onDmxFrame);
 
-    //OTA programming
-    ArduinoOTA.setHostname(identifier);
-    ArduinoOTA.onStart([]() {
-      String type;
-      if (ArduinoOTA.getCommand() == U_FLASH)
-        type = "sketch";
-      else // U_SPIFFS
-        type = "filesystem";
-    });
-    ArduinoOTA.onEnd([]() {});
-    ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {});
-    ArduinoOTA.onError([](ota_error_t error) {});
-    ArduinoOTA.begin(); 
-    
-    //------------------------------ Local Loop --------------------------------//
-    for(;;){
-      if(millis() >= t_WifiLoop+ts_WifiLoop){
-        t_WifiLoop = millis();
-        Serial.println(tr);
-        //If internet is connected then perform artnet read and OTA
-        if(WL_CONNECTED){
-          artnet.read();
-          ArduinoOTA.handle();
-        }
-      }
+  //OTA programming
+  ArduinoOTA.setHostname(identifier);
+  ArduinoOTA.onStart([]() {
+    String type;
+    if (ArduinoOTA.getCommand() == U_FLASH)
+      type = "sketch";
+    else // U_SPIFFS
+      type = "filesystem";
+  });
+
+  ArduinoOTA.onEnd([]() {});
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {});
+  ArduinoOTA.onError([](ota_error_t error) {});
+  ArduinoOTA.begin(); 
+  
+  //------------------------------ Local Loop --------------------------------//
+  for(;;){
+    if(millis() >= t_WifiLoop+ts_WifiLoop){
+      t_WifiLoop = millis();
+      Serial.println(tr);
+      //If internet is connected then perform artnet read and OTA
       if(WL_CONNECTED){
-        if(millis() >= (t_serial+ts_serial)){
-          t_serial = millis();
-          UDP.beginPacket(macbookIP, 4210);
-          UDP.printf(String(uint32_t(5000000+tr*1000)).c_str(),10);
-          UDP.printf(",");
-          UDP.printf(String(uint32_t(5000000+cart.refPos*1000)).c_str(),10);
-          UDP.printf(",");
-          UDP.printf(String(uint32_t(5000000+cart.position*1000)).c_str(),10);
-          UDP.printf(",");
-          UDP.printf(String(uint32_t(5000000+cart.refVel*1000)).c_str(),10);
-          UDP.printf(",");
-          UDP.printf(String(uint32_t(5000000+cart.velocityFiltered*1000)).c_str(),10);
-          UDP.printf(",");
-          UDP.printf(String(uint32_t(5000000+cart.accelerationFiltered*1000)).c_str(),10);
-          UDP.printf(",");
-          UDP.printf(String(uint32_t(5000000+pend.position*1000)).c_str(),10);
-          UDP.printf(",");
-          UDP.printf(String(uint32_t(5000000+pend.velocityFiltered*1000)).c_str(),10);
-          UDP.printf(",");
-          UDP.printf(String(uint32_t(5000000+ctrl*255*1000)).c_str(),10);
-          UDP.printf(",");
-          UDP.printf(String(uint32_t(5000000+Mode*1000)).c_str(),10);
-          UDP.printf(",");
-          UDP.printf(String(uint32_t(5000000+Pgain*1000)).c_str(),10);
-          UDP.printf(",");
-          UDP.printf(String(uint32_t(5000000+Igain*1000)).c_str(),10);
-          UDP.printf(",");
-          UDP.printf(String(uint32_t(5000000+Dgain*1000)).c_str(),10);
-          UDP.printf(",");
-          UDP.printf(String(uint32_t(5000000+Xgain*1000)).c_str(),10);
-          UDP.endPacket();
-        }
+        artnet.read();
+        ArduinoOTA.handle();
+      }
+    }
+    //Send UPD message with system data
+    if(WL_CONNECTED){
+      if(millis() >= (t_serial+ts_serial)){
+        t_serial = millis();
+        UDP.beginPacket(macbookIP, 4210);
+        UDP.printf(String(uint32_t(5000000+tr*1000)).c_str(),10);
+        UDP.printf(",");
+        UDP.printf(String(uint32_t(5000000+cart.refPos*1000)).c_str(),10);
+        UDP.printf(",");
+        UDP.printf(String(uint32_t(5000000+cart.position*1000)).c_str(),10);
+        UDP.printf(",");
+        UDP.printf(String(uint32_t(5000000+cart.refVel*1000)).c_str(),10);
+        UDP.printf(",");
+        UDP.printf(String(uint32_t(5000000+cart.velocityFiltered*1000)).c_str(),10);
+        UDP.printf(",");
+        UDP.printf(String(uint32_t(5000000+cart.accelerationFiltered*1000)).c_str(),10);
+        UDP.printf(",");
+        UDP.printf(String(uint32_t(5000000+pend.position*1000)).c_str(),10);
+        UDP.printf(",");
+        UDP.printf(String(uint32_t(5000000+pend.velocityFiltered*1000)).c_str(),10);
+        UDP.printf(",");
+        UDP.printf(String(uint32_t(5000000+ctrl*255*1000)).c_str(),10);
+        UDP.printf(",");
+        UDP.printf(String(uint32_t(5000000+Mode*1000)).c_str(),10);
+        UDP.printf(",");
+        UDP.printf(String(uint32_t(5000000+Pgain*1000)).c_str(),10);
+        UDP.printf(",");
+        UDP.printf(String(uint32_t(5000000+Igain*1000)).c_str(),10);
+        UDP.printf(",");
+        UDP.printf(String(uint32_t(5000000+Dgain*1000)).c_str(),10);
+        UDP.printf(",");
+        UDP.printf(String(uint32_t(5000000+Xgain*1000)).c_str(),10);
+        UDP.endPacket();
       }
     }
   }
 }
 
-
-
-
-//======================Main Loop========================//
-
+//Taks1 controls the motion of the pendulum
 void Task1_ControlSystemCode( void * pvParameters ){
-
+  //------------------------------Local Setup --------------------------------//
   // configure LED PWM functionalitites
   ledcSetup(motorChannel, freq, resolution);
   
@@ -249,7 +177,7 @@ void Task1_ControlSystemCode( void * pvParameters ){
   attachInterrupt(Enc1_0.PIN, isr10, CHANGE);
   attachInterrupt(Enc1_1.PIN, isr11, CHANGE);
 
-  //Inverted Pedulum control loop
+  //------------------------------ Local Loop --------------------------------//
   for(;;){
     if(millis() >= (tc+ts)){
       tc = millis();
@@ -288,34 +216,31 @@ void Task1_ControlSystemCode( void * pvParameters ){
         cart.refPos = -0.125;
         cart.refVel = 0.0;
       }
-      //step
+      //step response
       else if(Mode==2){
-        Pgain = float(G)/5;//5.0;
-        Igain = float(B)/5;//0.0;
-        Dgain = float(W)/10;//0.0;
-        //Pgain = 11;
-        //Igain = 5.6;
-        //Dgain = 0.0;
+        Pgain = float(G)/5;
+        Igain = float(B)/5;
+        Dgain = float(W)/10;
         cart.refPos = 0.1*round(sin(2*pi*0.1*tr));
         cart.refVel = 0.0;
       }
       //sine
       else if(Mode==3){
-        Pgain = float(G)/3;//5.0;
-        Igain = float(B)/3;//0.0;
-        Dgain = float(W)/10;//0.0;
+        Pgain = float(G)/3;
+        Igain = float(B)/3;
+        Dgain = float(W)/10;
         cart.refPos = 0.1*sin(2*pi*0.1*tr);
         cart.refVel = 0.1*cos(2*pi*0.1*tr);
       }
-      //track user input
+      //track user position input
       else if(Mode==4){
-        Pgain = float(G)/3;//5.0;
-        Igain = float(B)/3;//0.0;
-        Dgain = float(W)/10;//0.0;
+        Pgain = float(G)/3;
+        Igain = float(B)/3;
+        Dgain = float(W)/10;
         cart.refPos = 0.24 * (float(R)-127)/255;
         cart.refVel = 0.0;
       }
-      //track pendulum down
+      //stabilize pendulum down position
       else if(Mode==5){
         //Pendulum reference to center cart
         pend.refPos = cart.position;
@@ -336,7 +261,7 @@ void Task1_ControlSystemCode( void * pvParameters ){
           ctrl = 0;
         }
       }
-      //track pendulum up
+      //stabilize pendulum up position
       else if(Mode==6){
 
         //Control Parameters
@@ -399,7 +324,7 @@ void Task1_ControlSystemCode( void * pvParameters ){
       cart.e_pos = cart.refPos-cart.positionFiltered;
       cart.e_vel = cart.refVel-cart.velocityFiltered;
 
-      //Integral action only in small error band of +-1cm
+      //Integral action only in small error band of +-2cm
       if(cart.e_pos < 0.02 && cart.e_pos > -0.02){
         errInt = errInt + cart.e_pos*float(ts)/1000;
       }
@@ -415,9 +340,7 @@ void Task1_ControlSystemCode( void * pvParameters ){
         ctrl = Pgain * cart.e_pos + Igain * errInt + Dgain * cart.e_vel;
       }
       
-      
-      ctrl_unlimited = float(ctrl * 255);
-      
+      //Write control calue to output value which is unsigned
       if(ctrl > 0){
         mot.Volt = int(ctrl*255);
       }
@@ -427,41 +350,45 @@ void Task1_ControlSystemCode( void * pvParameters ){
       else{
         mot.Volt = 0;
       }
-      
+
+      //Limit motor voltage
       if(mot.Volt>255){
         mot.Volt = 255;
       }
+      //Cutoff control output when cart reaches end of track
       if(Mode > 1 && ((cart.position > 0.11 && ctrl > 0) || (cart.position < -0.11 && ctrl < 0))){
         mot.Volt = 0;
       }
       
-      //friction compensation right
+      //Coulomb friction compensation right
       float FrStaticR = 150;
       if(ctrl > 0 && mot.Volt > 0 && mot.Volt < FrStaticR){
         mot.Volt = FrStaticR;
       }
-      //friction compensation left
+      //Coulomb friction compensation left
       float FrStaticL = 155;
       if(ctrl < 0 && mot.Volt > 0 && mot.Volt < FrStaticL){
         mot.Volt = FrStaticL;
       }
       
-
       //Determine motor direction
       mot.Direction = (ctrl<=0.0);
-
+      
+      //Write control value to motor
       if(Mode == 0){
         ledcWrite(motorChannel,0);
       }
       else{
         ledcWrite(motorChannel,mot.Volt);
       }
+      //Write motor direction to motor
       digitalWrite(mot.DirPin0,mot.Direction);
       digitalWrite(mot.DirPin1,1-mot.Direction);
     }
   }
 }
 
+// Arduino code loop (needs to be here but has no function)
 void loop() {
   ;
 }
@@ -472,7 +399,7 @@ void loop() {
 //==============================================================================//
 //==============================================================================//
 
-
+//Read DMX values when available
 void onDmxFrame(uint16_t universe, uint16_t length, uint8_t sequence, uint8_t* data){
   sendFrame = 1;
   // set brightness of the whole strip 
