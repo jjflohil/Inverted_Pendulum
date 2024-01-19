@@ -106,8 +106,8 @@ EncoderPulse Enc0_1 = {22, 0};
 EncoderPulse Enc1_0 = {32, 0};
 EncoderPulse Enc1_1 = {33, 0};
 
-component cart = {0,0,0,0,0,0,0};
-component pend = {0,0,0,0,0,0,0};
+component cart = {0,0,0,0,0,0,0,0,0,0,0,0,0,0};
+component pend = {0,0,0,0,0,0,0,0,0,0,0,0,0,0};
 
 motor mot = {26,18,19,0,false};
 
